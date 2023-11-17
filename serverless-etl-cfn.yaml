@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template to create a serverless ETL job.
+Parameters:
+  S3BucketRaw:
+    Description: Bucket name for storing the raw data.
+    Type: String
+    AllowedPattern: '.+'
+    ConstraintDescription: Please provide appropriate S3 bucket to be created for raw storage layer.
+  S3BucketStandardized:
+    Description: Bucket name for storing the standardized data.
+    Type: String
+    AllowedPattern: '.+'
+    ConstraintDescription: Please provide appropriate S3 bucket to be created for standardized storage layer.
+  S3BucketConformed:
+    Description: Bucket name for storing the conformed/curated data.
+    Type: String
+    AllowedPattern: '.+'
+    ConstraintDescription: Please provide appropriate S3 bucket to be created for conformed storage layer.
+  S3BucketScripts:
+    Description: Bucket name where scripts are uploaded.
+    Type: String
+    AllowedPattern: '.+'
+    ConstraintDescription: Please provide the correct location of scripts stored in S3 bucket.
+Resources:
+  # Amazon S3 Bucket for raw storage layer
+  S3Bucket1:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketRaw
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+  # Amazon S3 Bucket for standardized storage layer
+  S3Bucket2:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketStandardized
+  # Amazon S3 Bucket for conformed storage layer
+  S3Bucket3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketConformed
+
+  # IAM role to be used by Glue jobs. It provides access to S3 and CloudWatch logs
+  GlueJobRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: glue-etl-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+
+  
+  #Glue job to transform raw data and move to standardized storage layer
+  RawToStandardized:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Join [ "/", [ 's3:/', !Ref S3BucketScripts, 'etl-raw-to-standardized.py' ] ]
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--S3_RAW": !Join [ "/", [ 's3:/', !Ref S3BucketRaw ] ]
+        "--S3_STANDARDIZED": !Join [ "/", [ 's3:/', !Ref S3BucketStandardized ] ]
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      GlueVersion: 4.0
+      WorkerType: G.1X
+      NumberOfWorkers: 5
+      Name: etl-raw-to-standardized
+      Role: !Ref GlueJobRole
+
+  #Glue job to transform the standardized data and move to conformed storage layer
+  StandardizedToConform:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Join [ "/", [ 's3:/', !Ref S3BucketScripts, 'etl-standardized-to-conform.py' ] ]
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--S3_STANDARDIZED": !Join [ "/", [ 's3:/', !Ref S3BucketStandardized ] ]
+        "--S3_CONFORM": !Join [ "/", [ 's3:/', !Ref S3BucketConformed ] ]
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      GlueVersion: 4.0
+      WorkerType: G.1X
+      NumberOfWorkers: 5
+      Name: etl-standardized-to-conform
+      Role: !Ref GlueJobRole
+
+  #Workflow to orechestrate the ETL process
+  ETLWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Description: 'ETL Workflow'
+      Name: 'etl-workflow'
+
+  #Event to trigger the worflow whenever a file is uploaded to raw storage layer
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref S3BucketRaw
+      Name: s3-event
+      State: ENABLED
+      Targets:
+        - Id: glueworkflow
+          Arn: !Join [ '', [ 'arn:aws:glue:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', 'workflow/', !Ref ETLWorkflow ] ]
+          RoleArn: !GetAtt EventRole.Arn
+
+
+  #IAM Role used by Event to trigger Glue workflow
+  EventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: event-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: gluefullaccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: glue:notifyEvent
+                Resource: '*'
+
+  #Glue Trigger for the job etl-raw-to-standardized
+  StandardizedJobTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Type: EVENT
+      Description: Trigger for Glue job etl-raw-to-standarized
+      Actions:
+        - JobName: !Ref RawToStandardized
+      Name: glue-trigger-for-standardized
+      WorkflowName: !Ref ETLWorkflow
+
+  #Glue Trigger for the job etl-standardized-to-conform
+  ConformJobTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: glue-trigger-for-conform
+      WorkflowName: !Ref ETLWorkflow
+      Type: CONDITIONAL
+      Description: Trigger for Glue job etl-standarized-to-conform											
+      Actions:
+        - JobName: !Ref StandardizedToConform
+          Arguments:
+            "--job-bookmark-option": "job-bookmark-enable"
+      StartOnCreation: true
+      Predicate:
+        Conditions:
+          - LogicalOperator: EQUALS
+            JobName: !Ref RawToStandardized
+            State: SUCCEEDED
+
+
+
+
+
+
+
+
