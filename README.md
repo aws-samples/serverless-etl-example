@@ -8,6 +8,7 @@ This Cloudformation template deploys a sample ETL pipeline. It deploys the follo
 
 ![Architecture Diagram](images/Serverless-ETL.png)
 
+
 **Important**: 
 1. This templates deploys various AWS services and there are costs associated with these services. Please refer the [AWS Pricing page](https://aws.amazon.com/pricing/) for details regarding pricing. You are responsible for any AWS costs incurred. No warranty is implied in this example.
 2. The scripts used in transformation are only for the purpose of demo. You are responsible to create scripts for you own transformation requirements.
